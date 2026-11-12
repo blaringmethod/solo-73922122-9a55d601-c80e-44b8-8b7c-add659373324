@@ -9,6 +9,8 @@ import socket
 import pytest
 
 from app.modbus_client import ModbusTcpClient
+from app.monitoring.manager import MonitorManager
+from app.monitoring.repository import MonitoringRepository
 from simulator import app as simulator
 
 
@@ -53,3 +55,30 @@ async def client(modbus_port: int) -> ModbusTcpClient:
         yield c
     finally:
         await c.aclose()
+
+
+@pytest.fixture
+async def monitor_env(tmp_path, modbus_port: int, request):
+    """独立的监测管理器 + 临时 SQLite 库 + 测试用共享 Modbus 客户端。
+
+    用例可用标记 ``@pytest.mark.modbus_timeout(秒)`` 覆盖客户端超时，
+    便于用模拟器延迟可靠制造缺测。
+    """
+    marker = request.node.get_closest_marker("modbus_timeout")
+    timeout = marker.args[0] if marker else 2.0
+    modbus_client = ModbusTcpClient(
+        host="127.0.0.1", port=modbus_port, unit_id=1, timeout=timeout
+    )
+    repo = MonitoringRepository(str(tmp_path / "monitor_test.db"))
+    manager = MonitorManager(
+        client_provider=lambda: modbus_client,
+        repository=repo,
+        circuit_count=8,
+        interval_seconds=0.05,  # 测试加速轮间等待
+    )
+    try:
+        yield manager, repo, modbus_client
+    finally:
+        await manager.shutdown()
+        repo.close()
+        await modbus_client.aclose()

@@ -7,8 +7,10 @@
 * ``GET  /read/{circuit}``  读取单个回路当前温度
 * ``GET  /read/all``        并发读取全部 8 个回路
 * ``POST /read/batch``      并发读取指定回路列表
+* ``/monitor/*``            持续监测任务（启停、按任务查询采样轮次与超温事件）
 
 每次请求都发起一次真实 Modbus 读取，服务端不缓存任何读数。
+监测任务复用同一条共享 Modbus 连接并发采样，整轮结果与事件落 SQLite。
 """
 
 from __future__ import annotations
@@ -24,6 +26,9 @@ from pydantic import BaseModel, Field
 
 from .config import Settings, get_settings
 from .modbus_client import ModbusError, ModbusErrorCode, ModbusTcpClient
+from .monitoring.manager import MonitorManager
+from .monitoring.repository import MonitoringRepository
+from .monitoring.routes import router as monitor_router
 
 settings: Settings = get_settings()
 client = ModbusTcpClient(
@@ -31,6 +36,15 @@ client = ModbusTcpClient(
     port=settings.modbus_port,
     unit_id=settings.modbus_unit_id,
     timeout=settings.modbus_timeout,
+)
+
+# 监测持久化与任务管理器（单进程单任务）。测试可替换 app.state 上的实例。
+repository = MonitoringRepository(settings.monitor_db_path)
+monitor_manager = MonitorManager(
+    client_provider=lambda: client,
+    repository=repository,
+    circuit_count=settings.register_count,
+    interval_seconds=settings.monitor_interval_seconds,
 )
 
 _HTTP_STATUS_BY_CODE = {
@@ -91,19 +105,39 @@ class BatchResponse(BaseModel):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    yield
-    await client.aclose()
+    # 重启恢复：上次进程未正常停止的任务收尾，未结束事件一律标中断。
+    recovered = await asyncio.to_thread(
+        repository.recover_after_restart, _now_iso()
+    )
+    for item in recovered:
+        print(
+            "[monitor] 重启恢复：任务 %s 的未结束事件 %s 已标记为中断"
+            % (item["task_id"], item["interrupted_event_ids"]),
+            flush=True,
+        )
+    app.state.monitor_manager = monitor_manager
+    try:
+        yield
+    finally:
+        # 停机时优雅停止监测：在途轮落库、未结束事件标中断后再关闭连接。
+        await monitor_manager.shutdown()
+        repository.close()
+        await client.aclose()
 
 
 app = FastAPI(
-    title="冷库温度采集 API",
+    title="冷库温度采集与持续监测 API",
     description=(
         "单进程 Modbus TCP 采集服务。所有请求共用一条 TCP 连接，支持多笔读取"
-        "同时在途（流水线）、乱序响应匹配、2 秒超时与断线自动重连，读数不缓存。"
+        "同时在途（流水线）、乱序响应匹配、2 秒超时与断线自动重连，读数不缓存。\n\n"
+        "持续监测（/monitor）：提交 8 个回路温度上限后单进程只运行一个任务，"
+        "每轮并发采样、逐回路两轮确认超限开事件，失败记缺测不解除事件，"
+        "整轮读数/失败原因、判定状态与事件一并落 SQLite，停止时未结束事件标中断。"
     ),
-    version="1.0.0",
+    version="2.0.0",
     lifespan=lifespan,
 )
+app.include_router(monitor_router)
 
 
 def _validate_circuit(circuit: int) -> None:

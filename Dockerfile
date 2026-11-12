@@ -12,6 +12,9 @@ COPY app ./app
 COPY simulator ./simulator
 COPY scripts ./scripts
 
+# SQLite 监测数据目录（compose 用命名卷挂载到此处）
+RUN mkdir -p /data
+
 # 采集服务
 EXPOSE 8000
 # 模拟控制器（Modbus 5020 / 控制 API 8081）

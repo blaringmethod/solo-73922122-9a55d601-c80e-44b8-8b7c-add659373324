@@ -38,6 +38,8 @@ class Settings:
     modbus_unit_id: int
     modbus_timeout: float
     register_count: int  # 回路数量，对应地址 0 ~ register_count-1
+    monitor_db_path: str  # 监测任务 SQLite 数据库文件路径
+    monitor_interval_seconds: float  # 每轮采集结束后到下一轮的等待秒数
 
 
 def get_settings() -> Settings:
@@ -47,4 +49,6 @@ def get_settings() -> Settings:
         modbus_unit_id=_env_int("MODBUS_UNIT_ID", 1),
         modbus_timeout=_env_float("MODBUS_TIMEOUT_SECONDS", 2.0),
         register_count=_env_int("REGISTER_COUNT", 8),
+        monitor_db_path=_env_str("MONITOR_DB_PATH", "/data/monitoring.db"),
+        monitor_interval_seconds=_env_float("MONITOR_INTERVAL_SECONDS", 1.0),
     )
